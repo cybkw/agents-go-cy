@@ -17,9 +17,21 @@ Windows 打包构建：
 
     just build
 
-在 PowerShell 中启动：
+### 启动终端（Windows）
+
+首次使用先在项目根目录运行 `just build`，生成程序及所需的 ConPTY 组件。之后选择以下任一方式启动。
+
+在项目根目录的 PowerShell 中执行：
 
     & .\target\release\herdr.exe --session agents-go
+
+鼠标双击启动：
+
+1. 在资源管理器中打开项目根目录。
+2. 双击 `start.cmd`，脚本自动切换到项目目录并打开 `agents-go` 会话。
+3. 如需从桌面启动，右键 `start.cmd`，选择「发送到」→「桌面快捷方式」（Windows 11 可先点「显示更多选项」），之后双击桌面快捷方式即可。
+
+脚本始终使用 `target\release\herdr.exe`，无需把程序加入 PATH。程序缺失时会提示先运行 `just build`；启动失败时会保留窗口显示错误。
 
 如需调试版：
 

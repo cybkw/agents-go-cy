@@ -1,9 +1,11 @@
 <!-- Modified for Agents Go by Agents Go contributors, 2026-10-01. See NOTICE. -->
 # Agents Go 进度
 
-最后更新：2026-10-01
+最后更新：2026-10-14
 
 ## 当前状态
+
+2026-10-14：新增根目录 `start.cmd`，支持双击启动 release 程序的 `agents-go` 会话；自动切换到脚本所在目录，程序缺失或启动失败时保留提示。已从 `C:\Windows` 工作目录运行脚本，确认启动的 `herdr.exe` 使用 `--session agents-go`；`git diff --check` 通过。窗口显示与交互仍需手动确认。
 
 Agents Go 已公开于 https://github.com/zhangxq0606-ctrl/agents-go；默认分支与当前本地分支均为 main，origin 指向本仓库，upstream 指向 herdrdev/herdr。功能改造提交为 9d487e2，公开准备提交为 9eb7bc3；已核验 GitHub 提交、README、LICENSE 和 NOTICE 与本地一致。Cargo 包名和可执行文件名继续保留 herdr（用户约定），不做全面品牌迁移。
 
