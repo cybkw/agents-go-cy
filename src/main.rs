@@ -42,6 +42,7 @@ mod plugin_command;
 mod plugin_paths;
 mod popup_size;
 mod product_announcements;
+mod project_context;
 mod protocol;
 mod pty;
 mod raw_input;
@@ -617,6 +618,7 @@ fn main() -> io::Result<()> {
         println!("       herdr api <subcommand> ...");
         println!("       herdr completion <shell>");
         println!("       herdr config <subcommand> ...");
+        println!("       herdr context <subcommand> ...");
         println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
@@ -651,6 +653,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr config reset-keys",
                 "Back up config.toml and remove custom keybindings",
+            ),
+            (
+                "herdr context <subcommand>",
+                "Record project conversations and restore context manually",
             ),
             (
                 "herdr channel <subcommand>",

@@ -1,3 +1,4 @@
+// Modified for Agents Go by Agents Go contributors, 2026-10-22. See NOTICE.
 use std::io::Write;
 
 use clap::{Arg, ArgAction, ArgGroup, Command, ValueHint};
@@ -33,6 +34,7 @@ pub(super) fn command() -> Command {
         .subcommand(update_command())
         .subcommand(status_command())
         .subcommand(config_command())
+        .subcommand(context_command())
         .subcommand(channel_command())
         .subcommand(machine::command())
         .subcommand(server_command())
@@ -140,6 +142,68 @@ fn config_command() -> Command {
         .about("Manage local configuration")
         .subcommand(Command::new("check").about("Validate config.toml and print diagnostics"))
         .subcommand(Command::new("reset-keys").about("Reset custom keybindings"))
+}
+
+pub(super) fn context_command() -> Command {
+    let read_options = |command: Command| {
+        command
+            .arg(
+                path_option("project", "PATH")
+                    .help("Enabled project directory (default: discover from cwd)"),
+            )
+            .arg(option("from", "N").help("First record number, inclusive"))
+            .arg(option("through", "N").help("Last record number, inclusive"))
+            .arg(
+                option("limit", "N")
+                    .default_value("40")
+                    .help("Maximum number of recent matching records"),
+            )
+    };
+    Command::new("context")
+        .about("Save numbered project conversations and restore context explicitly")
+        .subcommand_required(true)
+        .subcommand(
+            Command::new("enable")
+                .about("Enable project-local Codex/Claude recording and manual restore skills")
+                .arg(path_option("project", "PATH").help("Project root (default: cwd)"))
+                .arg(
+                    option("agent", "AGENT")
+                        .action(ArgAction::Append)
+                        .value_parser(["codex", "claude"])
+                        .help("Agent to configure; repeat to select both (default: both)"),
+                ),
+        )
+        .subcommand(
+            Command::new("capture")
+                .about("Record one native hook JSON payload from stdin, without injecting context")
+                .arg(
+                    option("agent", "AGENT")
+                        .required(true)
+                        .value_parser(["codex", "claude"]),
+                )
+                .arg(
+                    path_option("project", "PATH")
+                        .help("Require the hook cwd to belong to this project"),
+                ),
+        )
+        .subcommand(
+            read_options(
+                Command::new("history")
+                    .about("Read saved conversation records as Markdown or JSON"),
+            )
+            .arg(json_flag()),
+        )
+        .subcommand(
+            read_options(
+                Command::new("resume")
+                    .about("Print bounded historical context for a manually invoked skill"),
+            )
+            .arg(
+                option("max-chars", "N")
+                    .default_value("24000")
+                    .help("Character budget for displayed history; originals remain intact"),
+            ),
+        )
 }
 
 fn channel_command() -> Command {

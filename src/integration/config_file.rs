@@ -1,3 +1,4 @@
+// Modified for Agents Go by Agents Go contributors, 2026-10-22. See NOTICE.
 //! Protected writes for user-owned integration configuration, not managed assets.
 
 use std::fs::{self, OpenOptions};
@@ -19,7 +20,7 @@ pub(super) fn check_config_targets(dir: &Path, names: &[&str]) -> io::Result<()>
     Ok(())
 }
 
-pub(super) fn check_config_target(path: &Path) -> io::Result<()> {
+pub(crate) fn check_config_target(path: &Path) -> io::Result<()> {
     reject_hard_links(path)?;
     crate::platform::check_config_write_target(&resolve_target(path)?)
 }
@@ -69,7 +70,7 @@ fn resolve_target(path: &Path) -> io::Result<PathBuf> {
     )))
 }
 
-pub(super) fn write_config(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+pub(crate) fn write_config(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     check_config_target(path)?;
     let target = resolve_target(path)?;
     if crate::platform::write_existing_config(&target, contents.as_ref())? {
