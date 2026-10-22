@@ -404,13 +404,16 @@ fn task_tree_highlights_the_pane_and_preserves_navigation_preview() {
         ratatui::style::Color::Rgb(18, 18, 18)
     );
     for y in pane.y..pane.bottom() {
-        assert_eq!(frame[(pane.x + 5, y)].symbol(), "▎");
+        assert_eq!(frame[(pane.x + 5, y)].symbol(), "▌");
         assert_eq!(frame[(pane.x + 5, y)].fg, state.config.palette.accent);
         assert_eq!(
             frame[(pane.x + 8, y)].bg,
-            ratatui::style::Color::Rgb(23, 23, 23)
+            state.config.palette.active_row_bg
         );
     }
+    let name = &frame[(pane.x + 6, pane.y + 1)];
+    assert_eq!(name.fg, state.config.palette.text);
+    assert!(name.modifier.contains(ratatui::style::Modifier::BOLD));
     state.handle_input_bytes(&[0x02]);
     state.handle_input_bytes(b"w");
     let frame = state.compose(100, 24).unwrap().to_ratatui_buffer().unwrap();
@@ -426,6 +429,27 @@ fn task_tree_highlights_the_pane_and_preserves_navigation_preview() {
         frame[(workspace.x + 2, workspace.y)].bg,
         ratatui::style::Color::Rgb(18, 18, 18)
     );
+}
+
+#[test]
+fn task_tree_unfocused_shell_keeps_subdued_name_and_no_focus_marker() {
+    let mut state = state();
+    let mut projected = snapshot();
+    projected.panes[0].focused = false;
+    projected.focused_pane_id = None;
+    state.set_snapshot(Box::new(projected));
+    let frame = state.compose(100, 24).unwrap().to_ratatui_buffer().unwrap();
+    let pane = state.hits.endpoint_agents[0].0;
+    let name = &frame[(pane.x + 6, pane.y + 1)];
+    assert_eq!(name.fg, state.config.palette.subtext0);
+    assert!(!name.modifier.contains(ratatui::style::Modifier::BOLD));
+    for y in pane.y..pane.bottom() {
+        assert_ne!(frame[(pane.x + 5, y)].symbol(), "▌");
+        assert_eq!(
+            frame[(pane.x + 8, y)].bg,
+            ratatui::style::Color::Rgb(18, 18, 18)
+        );
+    }
 }
 
 #[test]

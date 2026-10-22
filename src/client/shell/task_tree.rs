@@ -607,7 +607,8 @@ pub(super) fn render(
             } => {
                 let focused = &endpoint.endpoint_id == state.active_endpoint_id && pane.focused;
                 let bg = if focused {
-                    palette.active_row_bg
+                    // Preserve the theme's contrast for the current terminal.
+                    config.palette.active_row_bg
                 } else {
                     palette.sidebar_bg
                 };
@@ -640,7 +641,7 @@ pub(super) fn render(
                             highlight_x,
                             line_y,
                             rect.right().saturating_sub(highlight_x).min(1),
-                            "▎",
+                            "▌",
                             Style::default().fg(palette.accent).bg(bg),
                         );
                     }
@@ -678,13 +679,17 @@ pub(super) fn render(
                     status_x.saturating_sub(1),
                     &label,
                     Style::default()
-                        .fg(if agent.is_none() {
+                        .fg(if !focused && agent.is_none() {
                             palette.subtext0
                         } else {
                             palette.text
                         })
                         .bg(bg)
-                        .add_modifier(Modifier::empty()),
+                        .add_modifier(if focused {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 );
                 if pane.label.is_some() {
                     let hint = format!(" · {kind}");
