@@ -180,6 +180,7 @@ impl ClientShellState {
                             ClientShellOverlay::Onboarding
                                 | ClientShellOverlay::ProductAnnouncement(_)
                                 | ClientShellOverlay::ReleaseNotes(_)
+                                | ClientShellOverlay::ConversationHistory(_)
                         )
                     ) {
                         self.reconcile_input_source();
@@ -213,6 +214,7 @@ impl ClientShellState {
                             ClientShellOverlay::Onboarding
                                 | ClientShellOverlay::ProductAnnouncement(_)
                                 | ClientShellOverlay::ReleaseNotes(_)
+                                | ClientShellOverlay::ConversationHistory(_)
                         )
                     ) {
                         self.reconcile_input_source();
@@ -408,7 +410,11 @@ impl ClientShellState {
             crate::input::RepeatPlan::Forwarded(target) => {
                 let pane_blocked_by_popup = matches!(&target, ClientInputTarget::Pane(_))
                     && (self.popup_pending || self.popup_terminal_id.is_some());
-                if !pane_blocked_by_popup {
+                let blocked_by_history = matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::ConversationHistory(_))
+                );
+                if !pane_blocked_by_popup && !blocked_by_history {
                     self.push_pane_key(target, key, outcome);
                 }
             }
@@ -508,6 +514,13 @@ impl ClientShellState {
     ) -> Option<ClientInputTarget> {
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
+            return None;
+        }
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::ConversationHistory(_))
+        ) {
+            self.route_overlay_key(key, outcome);
             return None;
         }
         if matches!(
@@ -996,6 +1009,7 @@ impl ClientShellState {
                 ClientShellOverlay::Onboarding
                     | ClientShellOverlay::ProductAnnouncement(_)
                     | ClientShellOverlay::ReleaseNotes(_)
+                    | ClientShellOverlay::ConversationHistory(_)
             )
         ) || self
             .copy_mode

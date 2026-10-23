@@ -1,9 +1,19 @@
 <!-- Modified for Agents Go by Agents Go contributors, 2026-10-01. See NOTICE. -->
 # Agents Go 进度
 
-最后更新：2026-10-22
+最后更新：2026-10-23
 
 ## 当前状态
+
+2026-10-23 双击入口更新：`start.cmd` 改为启动 `target/debug/herdr.exe` 新版界面，通过显式会话名、socket 与配置路径连接原 `agents-go` 会话；不传会覆盖 socket 选择的 `--session`。原后台未运行时，先隐藏启动已打包的 release 服务器并等待 API 就绪，以继续使用原会话数据。debug 缺失时提示 `cargo build --locked`，所需 release 服务器缺失时提示 `just build`，启动失败保留窗口提示。已从 `C:\Windows` 工作目录验证连接现有服务器；另用独立临时 APPDATA 验证无服务器时的启动路径，新版客户端成功连上新建的隔离服务器。测试会话和窗口均已停止，原 13 个终端与焦点保持不变；7 项文档契约及 `git diff --check` 通过。中英文 README 已同步。
+
+2026-10-23 新版客户端重启与真实界面验证：按用户要求，以默认 `target/debug/herdr.exe` 连接现有 release 服务器的 `agents-go` 会话，确认连接成功后通过 `Ctrl+B`、`Q` 正常退出旧 release 客户端。服务器未重启；前后 13 个 pane 的 ID、terminal ID 与聚焦 pane 一致，现有 Agent 进程继续运行。debug 默认使用独立的 `agents-go-dev` 目录，因此本次显式指定现有 API socket、会话名和本地配置副本；仅副本启用 `experimental.allow_nested` 以允许从当前 Agent 环境启动界面，未修改全局配置或 `start.cmd`。当前工作台界面为新版 debug 客户端，后台服务器仍为原 release 程序。
+
+本轮再次验证：`client::shell::` 387 项通过、3 项性能辅助测试按原规则忽略，`project_context::` 30 项及 `just lint` 通过。通过定向 Win32 控制台输入与真实屏幕回读，确认项目右键「对话记录」入口、19 条记录最新在前、最新用户消息完整正文、Home/End 键盘选择、鼠标选择助手正文、刷新保留选中项及 Esc 关闭全部正常；验证前后账本 SHA-256 一致。证据保存在被 Git 忽略的 `.tmp/history-live-validation.json` 及同目录屏幕回读／运行时快照中。长正文滚动、分页及窄屏继续以已有回归测试为依据，本轮真实项目仅 19 条记录，未将这些场景额外标记为真实界面验收通过。完整 `just test`／`just check` 仍未运行，既有 EFS 与真实终端测试限制保留。
+
+2026-10-22 对话记录窗口：已实现「本地项目／最近项目右键 → 对话记录」只读入口，首次后台读取最近 100 条并按编号倒序排列，展示角色、Agent、UTC 时间、摘要与完整正文；支持键鼠选择、正文滚动、刷新、加载更早及窄屏列表／正文切换。读取复用现有账本锁与校验，窗口关闭或端点切换后不会接收旧结果；未启用、空账本与读取错误均有提示。远程端点不会把远端路径当作本地路径读取。窗口不向 Agent 发送内容，普通输入、粘贴及打开前已按住按键的重复事件均被拦截，必要的按键释放仍交回原终端。项目路径取被点击工作区实际 pane 的目录，不受新终端目录策略影响；未新增依赖或修改公共协议。
+
+本轮验证：对话窗口 23 项回归包含于客户端 `client::shell::` 测试中，共 387 项通过、3 项性能辅助测试按原规则忽略；`project_context::` 30 项通过。`just lint`（格式与全 targets Clippy）、6 项热路径架构检查、7 项文档契约及 55 项集成资源测试通过。维护检查在 `PYTHONUTF8=1` 下通过：Python 150 项中 5 项按原规则跳过，发布工作流 4 项通过、1 项跳过；首次运行遇到默认 GBK 读取既有 UTF-8 vendor 文件错误，未修改测试或 vendor 文件。独立审查发现的长按重复输入穿透、新终端目录策略误导账本路径两项问题已修复并复核通过。正文换行按选中记录和宽度缓存，未扩大按 pane 数量执行的循环；长期超大账本性能仍未验证。默认 `target/debug/herdr.exe` 已通过 `cargo build --locked` 构建，可用该程序打开工作台验收；当前运行中的 `target/release/herdr.exe` 保持原版本。真实终端界面尚待手动验收，完整 `just test`／`just check` 未运行，既有 EFS 与真实终端测试限制保留。
 
 2026-10-22 原生采集验收通过：用户在 Codex 界面完成信任后，只读 `hooks/list` 确认项目 `UserPromptSubmit`、`Stop` 均 enabled 且 trusted；真实用户消息和对应最终回复分别由原生事件自动保存为 #0007、#0008，没有手工补录。一次性本地观察脚本已核对会话、轮次和 reply_to；被 Git 忽略的 `.agents-go/native-validation.json` 返回 `status=passed`，确认用户与最终回复双向自动采集。Claude 原生采集、跨 Agent 恢复的界面验收及超长账本规模性能仍待验证。
 

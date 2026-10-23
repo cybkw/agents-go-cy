@@ -2250,6 +2250,7 @@ async fn run_client_loop(
                         let (effects, notification_repaint) = shell.tick_notifications(now);
                         shell.poll_project_catalog(now, &mut outcome);
                         outcome.repaint |= shell.tick_task_animation(now)
+                            | shell.poll_conversation_history()
                             | notification_repaint
                             | shell.tick_copy_feedback(now)
                             | shell.tick_workspace_highlight(now)

@@ -17,6 +17,7 @@ impl ClientContextMenuOverlay {
                     items.push(item("打开项目", Action::OpenProject));
                 }
                 items.push(item("完整路径", Action::ProjectPath));
+                items.push(item("对话记录", Action::ConversationHistory));
                 if *can_forget {
                     items.push(item("从最近项目移除", Action::ForgetProject));
                 }
@@ -107,11 +108,13 @@ impl ClientContextMenuOverlay {
             items.extend([
                 item("新建终端", Action::NewTab),
                 item("在新终端运行命令…", Action::RunTaskCommand),
+                item("对话记录", Action::ConversationHistory),
             ]);
             items.sort_by_key(|item| match item.action {
                 Action::NewTab => 0,
                 Action::RunTaskCommand => 1,
                 Action::Rename => 2,
+                Action::ConversationHistory => 3,
                 Action::NewWorktree | Action::OpenWorktree => 3,
                 Action::ToggleGroup => 4,
                 Action::Close => 5,
@@ -285,6 +288,9 @@ impl ClientShellState {
                         self.forget_recent_project(cwd, outcome)
                     }
                     ClientContextMenuAction::ProjectPath => self.show_recent_project_path(cwd),
+                    ClientContextMenuAction::ConversationHistory => {
+                        self.open_conversation_history(cwd)
+                    }
                     _ => {}
                 }
                 outcome.repaint = true;
@@ -327,6 +333,31 @@ impl ClientShellState {
 
         match action {
             ClientContextMenuAction::NewTab => self.create_task_session(workspace_id, outcome),
+            ClientContextMenuAction::ConversationHistory => {
+                let cwd = self.snapshot.as_deref().and_then(|snapshot| {
+                    let workspace = snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == workspace_id)?;
+                    // new_workspace_cwd applies the terminal launch policy (for
+                    // example HOME), so read actual pane evidence instead.
+                    snapshot
+                        .panes
+                        .iter()
+                        .filter(|pane| pane.workspace_id == workspace_id)
+                        .min_by_key(|pane| (pane.tab_id != workspace.active_tab_id, !pane.focused))
+                        .and_then(|pane| pane.foreground_cwd.as_ref().or(pane.cwd.as_ref()))
+                        .cloned()
+                });
+                if let Some(cwd) = cwd {
+                    self.open_conversation_history(cwd);
+                } else {
+                    self.overlay = Some(ClientShellOverlay::StatusInfo(
+                        "无法确定此项目的目录，请在项目所在机器使用 context history 查看记录。"
+                            .into(),
+                    ));
+                }
+            }
             ClientContextMenuAction::RunTaskCommand => {
                 self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
                     title: "command for new terminal",
@@ -383,6 +414,22 @@ impl ClientShellState {
             }
             _ => {}
         }
+    }
+
+    fn open_conversation_history(&mut self, cwd: String) {
+        // Remote endpoint paths must never be interpreted as client-local files.
+        if !self.active_endpoint_id.is_local()
+            || self.config.keybinding_source != ClientShellKeybindingSource::Local
+        {
+            self.overlay = Some(ClientShellOverlay::StatusInfo(
+                "对话记录窗口目前仅支持本地项目。请在项目所在机器使用 context history 查看记录。"
+                    .into(),
+            ));
+            return;
+        }
+        self.overlay = Some(ClientShellOverlay::ConversationHistory(
+            ConversationHistoryOverlay::new(cwd),
+        ));
     }
 
     fn activate_tab_context_action(

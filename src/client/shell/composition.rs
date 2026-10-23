@@ -161,6 +161,9 @@ impl ClientShellState {
         cols: u16,
         rows: u16,
     ) -> Option<crate::client::frame_output::ComposedFrame> {
+        if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
+            history.prepare_layout(cols, rows);
+        }
         self.last_composed_at = Some(std::time::Instant::now());
         self.selection_repaint_deadline = None;
         if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
@@ -692,6 +695,7 @@ impl ClientShellState {
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
+                self.hits.conversation_history = rendered.conversation_history;
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;

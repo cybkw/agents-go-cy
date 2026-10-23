@@ -720,6 +720,13 @@ impl ClientShellState {
             self.task_navigation_cursor = None;
         }
         self.update_link_hover(mouse, outcome);
+        if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
+            if history.handle_mouse(mouse, &self.hits.conversation_history) {
+                self.overlay = None;
+            }
+            outcome.repaint = true;
+            return;
+        }
         let point = (mouse.column, mouse.row);
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()

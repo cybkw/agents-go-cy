@@ -123,6 +123,7 @@ pub(super) struct ShellHitMap {
     pub(super) notification_toast: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
+    pub(super) conversation_history: ConversationHistoryHits,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -293,6 +294,7 @@ pub(super) enum ClientShellOverlayKind {
     ConfirmClose,
     Help,
     StatusInfo,
+    ConversationHistory,
     Navigator,
     WorktreeCreate,
     WorktreeOpen,
@@ -525,6 +527,7 @@ pub(super) enum ClientContextMenuAction {
     OpenProject,
     ForgetProject,
     ProjectPath,
+    ConversationHistory,
     Rename,
     Close,
     NewWorktree,
@@ -609,6 +612,7 @@ pub(super) enum ClientShellOverlay {
     ConfirmClose(ClientConfirmCloseOverlay),
     Help(ClientHelpOverlay),
     StatusInfo(String),
+    ConversationHistory(ConversationHistoryOverlay),
     Navigator(ClientNavigatorOverlay),
     WorktreeCreate(ClientWorktreeCreateOverlay),
     WorktreeOpen(ClientWorktreeOpenOverlay),
@@ -628,6 +632,7 @@ impl ClientShellOverlay {
             Self::ConfirmClose(_) => ClientShellOverlayKind::ConfirmClose,
             Self::Help(_) => ClientShellOverlayKind::Help,
             Self::StatusInfo(_) => ClientShellOverlayKind::StatusInfo,
+            Self::ConversationHistory(_) => ClientShellOverlayKind::ConversationHistory,
             Self::Navigator(_) => ClientShellOverlayKind::Navigator,
             Self::WorktreeCreate(_) => ClientShellOverlayKind::WorktreeCreate,
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
@@ -1927,6 +1932,13 @@ impl ClientShellState {
             return true;
         }
         false
+    }
+
+    pub(crate) fn poll_conversation_history(&mut self) -> bool {
+        match self.overlay.as_mut() {
+            Some(ClientShellOverlay::ConversationHistory(history)) => history.poll(),
+            _ => false,
+        }
     }
 
     pub(crate) fn timer_delay(&self, now: std::time::Instant) -> std::time::Duration {

@@ -52,6 +52,7 @@ fn render_status_info(b: &mut Buffer, text: &str, p: &Palette) -> Option<Overlay
 pub(crate) struct OverlayRender {
     pub(crate) area: Rect,
     pub(crate) menu_rows: Vec<(Rect, usize)>,
+    pub(in crate::client::shell) conversation_history: ConversationHistoryHits,
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,
     pub(crate) cancel: Rect,
@@ -110,6 +111,14 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
         ClientShellOverlay::StatusInfo(text) => render_status_info(b, text, p),
+        ClientShellOverlay::ConversationHistory(history) => {
+            let rendered = super::super::conversation_history::render(b, history, p)?;
+            Some(OverlayRender {
+                area: rendered.area,
+                conversation_history: rendered.hits,
+                ..Default::default()
+            })
+        }
         ClientShellOverlay::Navigator(v) => {
             render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
         }

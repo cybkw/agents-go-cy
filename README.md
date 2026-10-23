@@ -19,7 +19,7 @@ Windows 打包构建：
 
 ### 启动终端（Windows）
 
-首次使用先在项目根目录运行 `just build`，生成程序及所需的 ConPTY 组件。之后选择以下任一方式启动。
+首次使用先在项目根目录运行 `just build`，生成 release 程序及所需的 ConPTY 组件；再运行 `cargo build --locked`，生成双击入口使用的新版 debug 客户端。之后选择以下任一方式启动。
 
 在项目根目录的 PowerShell 中执行：
 
@@ -31,7 +31,7 @@ Windows 打包构建：
 2. 双击 `start.cmd`，脚本自动切换到项目目录并打开 `agents-go` 会话。
 3. 如需从桌面启动，右键 `start.cmd`，选择「发送到」→「桌面快捷方式」（Windows 11 可先点「显示更多选项」），之后双击桌面快捷方式即可。
 
-脚本始终使用 `target\release\herdr.exe`，无需把程序加入 PATH。程序缺失时会提示先运行 `just build`；启动失败时会保留窗口显示错误。
+`start.cmd` 当前使用 `target\debug\herdr.exe` 显示新版界面，先运行 `cargo build --locked` 生成该程序；无需加入 PATH。脚本通过显式 socket 路径连接原 `agents-go` 会话；后台未运行时，先用 `target\release\herdr.exe` 恢复原会话，再连接新版界面。release 程序及 ConPTY 组件由 `just build` 生成。程序缺失或启动失败时会保留提示。
 
 如需调试版：
 
@@ -78,6 +78,8 @@ Bash 或 zsh（`~/.bashrc` 或 `~/.zshrc`）：
     herdr context history --limit 100 --json
 
 这些读取命令无需启动工作台服务器，不改记录，也不向其他 Agent 自动发送内容。命令不在 PATH 时，使用启用时的程序绝对路径。
+
+在新版工作台中，也可以右键侧栏的本地项目或最近项目，点击「对话记录」。窗口按编号从新到旧显示记录，首次载入最近 100 条；列表显示编号、角色、Agent、UTC 时间和摘要，右侧展示选中记录的完整正文。使用鼠标或 `↑`、`↓` 选择，`Tab`、`←`、`→` 切换列表与正文，滚轮或 `PageUp`、`PageDown` 滚动正文；`R` 刷新，`N` 或「加载更早」读取旧记录，`Esc` 关闭。窄窗口先展示列表，按 `Enter` 查看正文，`Esc` 返回列表。加载在后台执行；窗口只读，不会把记录发送给 Agent。远程项目暂通过项目所在机器的 `context history` 命令查看。
 
 记录通过 hook 开始生效，既有对话不会自动回填。稳定轮次或消息 ID 用于避免同事件重发；Claude 事件未提供这些 ID 时保留每次发言，包括正文相同的重复提问。没有最终回复的回合不会伪造回复；写入失败或账本损坏会报错并保留现有数据。当前读写会扫描整个账本，大量长期历史的性能尚未做规模验证。
 

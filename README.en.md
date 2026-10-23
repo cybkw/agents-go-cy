@@ -23,6 +23,8 @@ Start the packaged Windows build in PowerShell:
 
 For a debug build, run `cargo build --locked` and start `& .\target\debug\herdr.exe --session agents-go`.
 
+On Windows, `start.cmd` currently opens the debug build's updated interface while connecting to the original `agents-go` session through an explicit socket path. Build that client with `cargo build --locked`. If the original server is stopped, the script starts the packaged release server first to restore its session data. Keep the release executable and ConPTY runtime produced by `just build` available for this startup path.
+
 Windows is the manually verified platform for this fork. Other platform build paths are inherited from Herdr and have not been manually verified for these modifications.
 
 Run tests and checks:
@@ -55,6 +57,8 @@ Windows is the initial validation platform. Claude Code 2.1.139 or newer is requ
 Explicitly invoke `$project-resume` in Codex or `/project-resume` in Claude Code to read recent history and summarize progress and pending work. Historical requests are background information, not new execution authorization. Include a current instruction to continue when that is what you want. Display limits never shorten the stored original. Read complete entries with `herdr context history --from 1 --through 20 --limit 20`, or use `--json` for structured output. `herdr context resume` prints bounded context. Read commands work without a workspace server and never send prompts or change history.
 
 Recording starts when the hooks are active; existing conversations are not imported automatically. Stable turn or message IDs support retry deduplication. Claude events without these IDs are retained separately, including genuine repeated prompts. Missing final replies are not invented. Write failures and malformed journals report errors while preserving existing data. Reads and writes currently scan the full journal; large long-lived histories have not been scale-tested.
+
+In the updated workspace, right-click a local project or recent project in the sidebar and choose **对话记录** (conversation history). The window loads the newest 100 records first, showing sequence, role, Agent, UTC time, and a summary beside the selected record's full text. Click or use the arrow keys to select, use Tab or Left/Right to switch between the list and body, and scroll the body with the wheel or PageUp/PageDown. R refreshes, N or the older-records button loads earlier entries, and Esc closes. Narrow windows show the list first; Enter opens the body and Esc returns to the list. Loading runs in the background. The viewer is read-only and sends nothing to Agents. For remote projects, run `context history` on the project's machine.
 
 ## Known check limitations
 

@@ -160,8 +160,16 @@ fn offline_project_history_is_read_only_and_scoped_to_endpoint() {
     let Some(ClientShellOverlay::ContextMenu(menu)) = &state.overlay else {
         panic!("offline menu")
     };
-    assert_eq!(menu.items().len(), 1);
-    assert_eq!(menu.items()[0].action, ClientContextMenuAction::ProjectPath);
+    assert_eq!(
+        menu.items()
+            .iter()
+            .map(|item| item.action)
+            .collect::<Vec<_>>(),
+        vec![
+            ClientContextMenuAction::ProjectPath,
+            ClientContextMenuAction::ConversationHistory
+        ]
+    );
     state.project_catalogs.insert(
         ClientEndpointId::Ssh(
             crate::client::endpoint::ProfileId::parse("1123456789abcdef0123456789abcdef").unwrap(),
@@ -213,8 +221,16 @@ fn recent_project_actions_require_their_individual_capabilities() {
     let Some(ClientShellOverlay::ContextMenu(menu)) = &state.overlay else {
         panic!("project menu")
     };
-    assert_eq!(menu.items().len(), 1);
-    assert_eq!(menu.items()[0].action, ClientContextMenuAction::ProjectPath);
+    assert_eq!(
+        menu.items()
+            .iter()
+            .map(|item| item.action)
+            .collect::<Vec<_>>(),
+        vec![
+            ClientContextMenuAction::ProjectPath,
+            ClientContextMenuAction::ConversationHistory
+        ]
+    );
 }
 
 #[test]
