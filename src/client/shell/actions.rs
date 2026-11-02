@@ -593,6 +593,31 @@ impl ClientShellState {
                 return (true, Vec::new());
             }
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::ContinueConversation { agent, args } => {
+                let root_pane = match result {
+                    Ok(crate::api::schema::ResponseResult::TabCreated { root_pane, .. })
+                    | Ok(crate::api::schema::ResponseResult::WorkspaceCreated {
+                        root_pane, ..
+                    }) => root_pane,
+                    _ => return (true, Vec::new()),
+                };
+                // Public pane IDs identify the new terminal, regardless of where
+                // focus moved while creation was in flight. Use a bounded name.
+                use sha2::{Digest, Sha256};
+                let identity = format!("{:x}", Sha256::digest(root_pane.pane_id.as_bytes()));
+                let mut outcome = ClientShellInput::default();
+                self.push_endpoint_method(
+                    crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                        name: format!("history-{}", &identity[..24]),
+                        kind: agent,
+                        pane_id: root_pane.pane_id,
+                        args,
+                        timeout_ms: None,
+                    }),
+                    &mut outcome,
+                );
+                return (true, outcome.actions);
+            }
             PendingEndpointKind::TaskCommand { command } => {
                 if let Ok(crate::api::schema::ResponseResult::TabCreated { root_pane, .. }) = result
                 {

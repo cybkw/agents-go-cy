@@ -628,6 +628,11 @@ impl ClientShellState {
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
         endpoint.snapshot = Some(snapshot);
+        // Snapshot delivery can be pane-scaled and frequent. Defer directory
+        // discovery and all installation work to the throttled background path.
+        if endpoint_id.is_local() {
+            self.project_recording.mark_dirty();
+        }
         let pending_matches =
             endpoint
                 .pending_agent_view_projection

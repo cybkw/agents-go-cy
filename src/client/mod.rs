@@ -180,6 +180,7 @@ fn run_client_with_mode(
         };
     let shell_config = client_rendered_shell.then(|| {
         shell::ClientShellConfig::from_config(&loaded_config.config)
+            .with_context_recorder(std::env::current_exe().ok())
             .with_startup_config_diagnostic(startup_config_diagnostic)
             .with_startup_onboarding(loaded_config.config.should_show_onboarding())
             .with_keybinding_source(keybinding_source)
@@ -2249,12 +2250,14 @@ async fn run_client_loop(
                         }
                         let (effects, notification_repaint) = shell.tick_notifications(now);
                         shell.poll_project_catalog(now, &mut outcome);
+                        outcome.repaint |= shell.poll_project_recording(now);
                         outcome.repaint |= shell.tick_task_animation(now)
                             | shell.poll_conversation_history()
                             | notification_repaint
                             | shell.tick_copy_feedback(now)
                             | shell.tick_workspace_highlight(now)
                             | shell.tick_endpoint_error(now);
+                        shell.poll_conversation_history_continue(&mut outcome);
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

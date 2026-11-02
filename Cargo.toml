@@ -1,7 +1,7 @@
 # Modified for Agents Go by Agents Go contributors, 2026-10-01. See NOTICE.
 [package]
 name = "herdr"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 build = "build.rs"
 description = "visual terminal workspace for AI coding agents"

@@ -481,6 +481,8 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
             if history.handle_key(key, &self.hits.conversation_history) {
                 self.overlay = None;
+            } else if history.take_continue_request() {
+                self.continue_conversation_history(outcome);
             }
             outcome.repaint = true;
             return;

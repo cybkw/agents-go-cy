@@ -21,6 +21,8 @@ pub(crate) struct Record {
     pub role: String,
     pub text: String,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     pub reply_to: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     event_key: Option<String>,
@@ -127,6 +129,11 @@ fn capture_with_timeout(
         role: role.to_owned(),
         text: text.to_owned(),
         cwd: cwd.to_owned(),
+        transcript_path: (agent == "codex")
+            .then(|| payload.get("transcript_path").and_then(Value::as_str))
+            .flatten()
+            .filter(|path| Path::new(path).is_absolute() && !path.chars().any(char::is_control))
+            .map(str::to_owned),
         reply_to,
         event_key,
     };
@@ -369,6 +376,23 @@ mod tests {
 
     fn saved(root: &Path, agent: &str, payload: &Value) -> Record {
         capture(root, agent, payload).unwrap().unwrap()
+    }
+
+    #[test]
+    fn native_import_capture_keeps_optional_codex_transcript_path_and_reads_legacy_records() {
+        let root = project();
+        let native = std::env::temp_dir().join("sessions/2026/10/29/rollout-original.jsonl");
+        let mut input = prompt("native-path", "hello");
+        input["transcript_path"] = serde_json::json!(native);
+        let record = saved(&root, "codex", &input);
+        assert_eq!(record.transcript_path.as_deref(), native.to_str());
+        assert!(saved(&root, "claude", &input).transcript_path.is_none());
+        input["transcript_path"] = serde_json::json!("relative/file.jsonl");
+        assert!(saved(&root, "codex", &input).transcript_path.is_none());
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy.as_object_mut().unwrap().remove("transcript_path");
+        let decoded: Record = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.transcript_path.is_none());
     }
 
     #[test]

@@ -289,7 +289,7 @@ impl ClientShellState {
                     }
                     ClientContextMenuAction::ProjectPath => self.show_recent_project_path(cwd),
                     ClientContextMenuAction::ConversationHistory => {
-                        self.open_conversation_history(cwd)
+                        self.open_conversation_history(cwd, None)
                     }
                     _ => {}
                 }
@@ -350,7 +350,7 @@ impl ClientShellState {
                         .cloned()
                 });
                 if let Some(cwd) = cwd {
-                    self.open_conversation_history(cwd);
+                    self.open_conversation_history(cwd, Some(workspace_id));
                 } else {
                     self.overlay = Some(ClientShellOverlay::StatusInfo(
                         "无法确定此项目的目录，请在项目所在机器使用 context history 查看记录。"
@@ -416,7 +416,7 @@ impl ClientShellState {
         }
     }
 
-    fn open_conversation_history(&mut self, cwd: String) {
+    fn open_conversation_history(&mut self, cwd: String, workspace_id: Option<String>) {
         // Remote endpoint paths must never be interpreted as client-local files.
         if !self.active_endpoint_id.is_local()
             || self.config.keybinding_source != ClientShellKeybindingSource::Local
@@ -427,9 +427,9 @@ impl ClientShellState {
             ));
             return;
         }
-        self.overlay = Some(ClientShellOverlay::ConversationHistory(
-            ConversationHistoryOverlay::new(cwd),
-        ));
+        let mut history = ConversationHistoryOverlay::new(cwd);
+        history.set_workspace(workspace_id);
+        self.overlay = Some(ClientShellOverlay::ConversationHistory(history));
     }
 
     fn activate_tab_context_action(

@@ -184,7 +184,10 @@ pub(super) fn context_command() -> Command {
                 .arg(
                     path_option("project", "PATH")
                         .help("Require the hook cwd to belong to this project"),
-                ),
+                )
+                .arg(flag("if-enabled").conflicts_with("project").help(
+                    "Skip directories without project recording; report invalid configuration",
+                )),
         )
         .subcommand(
             read_options(

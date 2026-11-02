@@ -531,6 +531,7 @@ impl ClientShellState {
                 | PendingEndpointKind::ProjectCatalog { .. }
                 | PendingEndpointKind::ProjectOpen { .. }
                 | PendingEndpointKind::TaskCommand { .. }
+                | PendingEndpointKind::ContinueConversation { .. }
                 | PendingEndpointKind::ProductAnnouncementDismiss { .. }
                 | PendingEndpointKind::ReleaseNotesDismiss
                 | PendingEndpointKind::PopupCommand

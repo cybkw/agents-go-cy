@@ -146,6 +146,9 @@ impl ClientShellConfig {
                 }),
             local_keys: config.keys.clone(),
             keybinding_source: ClientShellKeybindingSource::Local,
+            context_recorder: None,
+            codex_import_locations:
+                crate::project_context::native_import::ImportLocations::from_environment(),
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             confirm_close: config.ui.confirm_close,

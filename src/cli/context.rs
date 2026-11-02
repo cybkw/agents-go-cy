@@ -78,7 +78,11 @@ fn run(matches: &ArgMatches) -> Result<Option<String>, String> {
                 .get_one::<String>("agent")
                 .ok_or("capture requires --agent")?;
             let project = options.get_one::<String>("project").map(Path::new);
-            project_context::capture(project, agent, &payload)?;
+            if options.get_flag("if-enabled") {
+                project_context::capture_if_enabled(agent, &payload)?;
+            } else {
+                project_context::capture(project, agent, &payload)?;
+            }
             // Native hooks must not add text or context to the agent's conversation.
             Ok(None)
         }

@@ -40,6 +40,10 @@ pub(crate) struct ClientShellConfig {
     pub(super) keybinds: LiveKeybindConfig,
     pub(super) local_keys: crate::config::KeysConfig,
     pub(super) keybinding_source: ClientShellKeybindingSource,
+    /// Set only by the interactive local client, never by observers or UI fixtures.
+    pub(super) context_recorder: Option<std::path::PathBuf>,
+    pub(super) codex_import_locations:
+        Result<crate::project_context::native_import::ImportLocations, String>,
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) confirm_close: bool,
@@ -657,6 +661,10 @@ pub(super) enum PendingEndpointKind {
     TaskCommand {
         command: String,
     },
+    ContinueConversation {
+        agent: String,
+        args: Vec<String>,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -917,6 +925,7 @@ pub(crate) struct ClientShellState {
     pub(super) project_catalog_signature: Option<super::project_history::ProjectCatalogSignature>,
     pub(super) project_catalog_refresh_at: Option<std::time::Instant>,
     pub(super) project_catalog_epoch: u64,
+    pub(super) project_recording: super::project_recording::ProjectRecording,
     pub(super) recent_scroll: usize,
     pub(super) recent_collapsed: bool,
     pub(super) task_animation_deadline: Option<std::time::Instant>,
@@ -1092,6 +1101,7 @@ impl ClientShellState {
             project_catalog_signature: None,
             project_catalog_refresh_at: None,
             project_catalog_epoch: 0,
+            project_recording: Default::default(),
             recent_scroll: 0,
             recent_collapsed: false,
             task_animation_deadline: None,

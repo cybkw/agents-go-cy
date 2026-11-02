@@ -1,9 +1,10 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions, TryLockError};
 #[cfg(all(test, windows))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -16,18 +17,18 @@ const HOOK_MARKER: &str = "Agents Go project context v1: ";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 struct PendingFile {
+    root: PathBuf,
     path: PathBuf,
     original: Option<Vec<u8>>,
     content: Vec<u8>,
 }
 
-/// Install project-local capture hooks and explicitly invoked recovery skills.
-/// All files are checked before writing; the enabling marker is written last.
-pub(crate) fn enable(
+fn prepare(
     root: &Path,
+    codex_root: &Path,
     executable: &Path,
     agents: &[String],
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Vec<PendingFile>, String> {
     if !root.is_absolute() || !root.is_dir() {
         return Err("project root must be an existing absolute directory".into());
     }
@@ -64,11 +65,13 @@ pub(crate) fn enable(
                 ".claude/skills/project-resume",
             ),
         };
-        let path = root.join(settings);
-        let original = read_checked(root, &path)?;
+        let hook_root = if agent == "codex" { codex_root } else { root };
+        let path = hook_root.join(settings);
+        let original = read_checked(hook_root, &path)?;
         let mut value = parse_object(&path, original.as_deref())?;
         merge_hooks(&mut value, agent, executable_text, root_text, &path)?;
         pending.push(PendingFile {
+            root: hook_root.to_path_buf(),
             path,
             original,
             content: json_bytes(&value)?,
@@ -99,6 +102,7 @@ pub(crate) fn enable(
             );
         }
         pending.push(PendingFile {
+            root: root.to_path_buf(),
             path: skill_path,
             original,
             content: skill.into_bytes(),
@@ -117,6 +121,7 @@ pub(crate) fn enable(
                 ));
             }
             pending.push(PendingFile {
+                root: root.to_path_buf(),
                 path,
                 original,
                 content: OPENAI_POLICY.as_bytes().to_vec(),
@@ -130,18 +135,13 @@ pub(crate) fn enable(
         }
     }
 
-    let ignore_path = root.join(".gitignore");
-    let ignore_original = read_checked(root, &ignore_path)?;
-    let ignore = match &ignore_original {
-        Some(bytes) => std::str::from_utf8(bytes)
-            .map_err(|error| format!("cannot read {} as UTF-8: {error}", ignore_path.display()))?,
-        None => "",
-    };
-    pending.push(PendingFile {
-        path: ignore_path,
-        content: append_ignore_paths(ignore, &ignore_paths).into_bytes(),
-        original: ignore_original,
-    });
+    pending.push(prepare_ignore(root, &ignore_paths)?);
+    if codex_root != root {
+        pending.push(prepare_ignore(
+            codex_root,
+            &["/.codex/hooks.json", "/.agents-go/"],
+        )?);
+    }
 
     let marker_path = root.join(".agents-go/project.json");
     let marker_original = read_checked(root, &marker_path)?;
@@ -155,6 +155,7 @@ pub(crate) fn enable(
         }
     }
     pending.push(PendingFile {
+        root: root.to_path_buf(),
         path: marker_path,
         content: marker_original
             .clone()
@@ -162,6 +163,98 @@ pub(crate) fn enable(
         original: marker_original,
     });
 
+    Ok(pending)
+}
+
+fn prepare_ignore(root: &Path, paths: &[&str]) -> Result<PendingFile, String> {
+    let path = root.join(".gitignore");
+    let original = read_checked(root, &path)?;
+    let ignore = match &original {
+        Some(bytes) => std::str::from_utf8(bytes)
+            .map_err(|error| format!("cannot read {} as UTF-8: {error}", path.display()))?,
+        None => "",
+    };
+    Ok(PendingFile {
+        root: root.to_path_buf(),
+        path,
+        content: append_ignore_paths(ignore, paths).into_bytes(),
+        original,
+    })
+}
+
+/// Codex resolves linked-worktree project hooks from the main checkout. The
+/// shared declaration must not opt that checkout into conversation recording.
+fn codex_hook_root(root: &Path, agents: &[String]) -> Result<PathBuf, String> {
+    if !agents.iter().any(|agent| agent == "codex") {
+        return Ok(root.to_path_buf());
+    }
+    let Some(info) = crate::workspace::git_worktree_info(root) else {
+        return Ok(root.to_path_buf());
+    };
+    if !info.is_linked_worktree {
+        return Ok(root.to_path_buf());
+    }
+    // Only a verified main checkout is a safe cross-directory installation
+    // target. Bare/custom metadata layouts must not be guessed from a parent.
+    let main = info
+        .git_common_dir
+        .parent()
+        .filter(|_| {
+            info.git_common_dir
+                .file_name()
+                .is_some_and(|name| name == ".git")
+        })
+        .ok_or("cannot locate the main checkout for Codex worktree hooks")?
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve main checkout: {error}"))?;
+    super::automatic::validate_directory(&main)?;
+    let main_info = crate::workspace::git_worktree_info(&main)
+        .ok_or("cannot verify the main checkout for Codex worktree hooks")?;
+    if main_info.is_bare || main_info.is_linked_worktree || main_info.git_dir != info.git_common_dir
+    {
+        return Err("cannot verify the main checkout for Codex worktree hooks".into());
+    }
+    Ok(main)
+}
+
+/// Install project-local capture hooks and explicitly invoked recovery skills.
+/// All files are checked before writing; the enabling marker is written last.
+pub(crate) fn enable(
+    root: &Path,
+    executable: &Path,
+    agents: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve project directory: {error}"))?;
+    let root = root.as_path();
+    let codex_root = codex_hook_root(root, agents)?;
+    let mut lock_roots = vec![root.to_path_buf(), codex_root.clone()];
+    lock_roots.sort();
+    lock_roots.dedup();
+    // Invalid settings retain the no-partial-install guarantee, including not
+    // creating .agents-go merely to acquire the installation lock.
+    if let Err(error) = prepare(root, &codex_root, executable, agents) {
+        // A concurrent Windows config replacement briefly has a pending backup.
+        // Its installer has already created the retained lock: defer that
+        // preflight error until we can inspect the completed settings under it.
+        if !lock_roots
+            .iter()
+            .any(|directory| directory.join(".agents-go/setup.lock").exists())
+        {
+            return Err(error);
+        }
+    }
+    let _locks = lock_roots
+        .iter()
+        .map(|directory| setup_lock(directory))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Another client may have installed while we waited. Build from its latest
+    // settings under the lock rather than racing a stale preflight result.
+    if codex_hook_root(root, agents)? != codex_root {
+        return Err("Git worktree changed during project capture setup; retry".into());
+    }
+    let pending = prepare(root, &codex_root, executable, agents)?;
     let mut changed = Vec::new();
     for file in pending {
         if file.original.as_deref() == Some(file.content.as_slice()) {
@@ -169,7 +262,7 @@ pub(crate) fn enable(
         }
         let result = (|| {
             // Reject changes made since preflight instead of replacing newer settings.
-            if read_checked(root, &file.path)? != file.original {
+            if read_checked(&file.root, &file.path)? != file.original {
                 return Err(format!(
                     "file changed during setup: {}",
                     file.path.display()
@@ -197,6 +290,35 @@ pub(crate) fn enable(
     Ok(changed)
 }
 
+fn setup_lock(root: &Path) -> Result<File, String> {
+    let path = root.join(".agents-go/setup.lock");
+    check_path(root, &path)?;
+    fs::create_dir_all(root.join(".agents-go"))
+        .map_err(|error| format!("cannot create project capture directory: {error}"))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("cannot open project capture setup lock: {error}"))?;
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if started.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err("项目记录配置正被其他进程更新，请稍后重试。".into());
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(format!("cannot lock project capture setup: {error}"));
+            }
+        }
+    }
+}
+
 fn unicode_path(path: &Path) -> Result<&str, String> {
     path.to_str()
         .filter(|text| !text.chars().any(char::is_control))
@@ -209,6 +331,15 @@ fn unicode_path(path: &Path) -> Result<&str, String> {
 }
 
 fn read_checked(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> {
+    if !check_path(root, path)? {
+        return Ok(None);
+    }
+    fs::read(path)
+        .map(Some)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))
+}
+
+fn check_path(root: &Path, path: &Path) -> Result<bool, String> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| "setup path escapes project root")?;
@@ -241,12 +372,10 @@ fn read_checked(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> {
             }
             crate::integration::config_file::check_config_target(path)
                 .map_err(|error| format!("cannot update {}: {error}", path.display()))?;
-            return fs::read(path)
-                .map(Some)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()));
+            return Ok(true);
         }
     }
-    Ok(None)
+    Ok(false)
 }
 
 fn is_redirect(metadata: &fs::Metadata) -> bool {
@@ -341,7 +470,11 @@ fn merge_hooks(
 }
 
 fn capture_handler(agent: &str, executable: &str, root: &str) -> Value {
-    let args = ["context", "capture", "--agent", agent, "--project", root];
+    let args: &[&str] = if agent == "codex" {
+        &["context", "capture", "--agent", agent, "--if-enabled"]
+    } else {
+        &["context", "capture", "--agent", agent, "--project", root]
+    };
     let marker = format!("{HOOK_MARKER}{agent}");
     if agent == "claude" {
         // Claude's exec form preserves stdin and argv without a platform shell.
@@ -354,14 +487,14 @@ fn capture_handler(agent: &str, executable: &str, root: &str) -> Value {
         })
     } else {
         let command = std::iter::once(executable)
-            .chain(args)
+            .chain(args.iter().copied())
             .map(posix_quote)
             .collect::<Vec<_>>()
             .join(" ");
         json!({
             "type": "command",
             "command": command,
-            "commandWindows": windows_command(executable, &args),
+            "commandWindows": windows_command(executable, args),
             "statusMessage": marker,
             "timeout": 30
         })
@@ -408,7 +541,7 @@ fn windows_command(executable: &str, args: &[&str]) -> String {
     // Windows PowerShell's native pipeline may transcode UTF-8 input. Copy raw
     // stdin bytes directly into the child instead, including multiline prompts.
     let script = format!(
-        "$ErrorActionPreference='Stop'; \
+        "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; \
          $start=New-Object System.Diagnostics.ProcessStartInfo; \
          $start.FileName={}; $start.Arguments={}; \
          $start.UseShellExecute=$false; $start.RedirectStandardInput=$true; \
@@ -485,6 +618,235 @@ mod tests {
             &std::env::current_exe().unwrap(),
             &["codex".into(), "claude".into()],
         )
+    }
+
+    fn linked_projects() -> (PathBuf, PathBuf) {
+        let container = project();
+        let main = container.join("main");
+        let linked = container.join("linked");
+        fs::create_dir(&main).unwrap();
+        let git = |args: &[&std::ffi::OsStr]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init".as_ref()]);
+        git(&[
+            "-c".as_ref(),
+            "user.name=Fixture".as_ref(),
+            "-c".as_ref(),
+            "user.email=fixture@example.invalid".as_ref(),
+            "-c".as_ref(),
+            "commit.gpgsign=false".as_ref(),
+            "commit".as_ref(),
+            "--allow-empty".as_ref(),
+            "-m".as_ref(),
+            "fixture".as_ref(),
+        ]);
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "--detach".as_ref(),
+            linked.as_os_str(),
+        ]);
+        (main.canonicalize().unwrap(), linked.canonicalize().unwrap())
+    }
+
+    #[test]
+    fn linked_worktree_installs_shared_codex_hook_without_enabling_main() {
+        let (main, linked) = linked_projects();
+        fs::create_dir(linked.join(".codex")).unwrap();
+        let legacy =
+            br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"legacy hook"}]}]}}"#;
+        fs::write(linked.join(".codex/hooks.json"), legacy).unwrap();
+        fs::create_dir(main.join(".codex")).unwrap();
+        fs::write(main.join(".codex/hooks.json"),
+            br#"{"custom":true,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}}"#).unwrap();
+        install(&linked).unwrap();
+        let settings: Value =
+            serde_json::from_slice(&fs::read(main.join(".codex/hooks.json")).unwrap()).unwrap();
+        assert_eq!(settings["custom"], true);
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "echo keep"
+        );
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        let handler = &settings["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        assert!(handler["command"]
+            .as_str()
+            .unwrap()
+            .contains("--if-enabled"));
+        assert!(!handler["command"].as_str().unwrap().contains("--project"));
+        assert!(!main.join(".agents-go/project.json").exists());
+        assert!(!main.join(".claude").exists());
+        assert!(linked.join(".agents-go/project.json").is_file());
+        assert!(linked.join(".claude/settings.local.json").is_file());
+        assert!(linked
+            .join(".agents/skills/project-resume/SKILL.md")
+            .is_file());
+        assert_eq!(fs::read(linked.join(".codex/hooks.json")).unwrap(), legacy);
+        assert!(install(&linked).unwrap().is_empty());
+        install(&main).unwrap();
+        let updated: Value =
+            serde_json::from_slice(&fs::read(main.join(".codex/hooks.json")).unwrap()).unwrap();
+        assert_eq!(
+            updated, settings,
+            "main must retain the shared route after opting in"
+        );
+    }
+
+    #[test]
+    fn invalid_shared_hooks_do_not_enable_the_linked_project() {
+        let (main, linked) = linked_projects();
+        fs::create_dir(main.join(".codex")).unwrap();
+        fs::write(main.join(".codex/hooks.json"), b"{broken").unwrap();
+        assert!(install(&linked).unwrap_err().contains("invalid JSON"));
+        assert!(!linked.join(".agents-go").exists());
+        assert!(!linked.join(".claude").exists());
+        assert!(!main.join(".agents-go").exists());
+        assert_eq!(
+            fs::read(main.join(".codex/hooks.json")).unwrap(),
+            b"{broken"
+        );
+    }
+
+    #[test]
+    fn linked_worktree_subproject_keeps_local_ownership_with_shared_hooks() {
+        let (main, linked) = linked_projects();
+        let subproject = linked.join("component");
+        fs::create_dir(&subproject).unwrap();
+        install(&subproject).unwrap();
+        assert!(main.join(".codex/hooks.json").is_file());
+        assert!(!subproject.join(".codex/hooks.json").exists());
+        assert!(!linked.join(".agents-go/project.json").exists());
+        assert!(!main.join(".agents-go/project.json").exists());
+        assert_eq!(super::super::project_root(&subproject).unwrap(), subproject);
+        let settings: Value = serde_json::from_slice(
+            &fs::read(subproject.join(".claude/settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["args"][5],
+            subproject.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn concurrent_worktrees_share_one_hook_without_enabling_the_main_project() {
+        let (main, first) = linked_projects();
+        let second = main.parent().unwrap().join("second");
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["worktree", "add", "--detach"])
+            .arg("../second")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let children: Vec<_> = [&first, &second, &first, &second]
+            .into_iter()
+            .map(|root| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "project_context::setup::tests::concurrent_setup_probe",
+                    ])
+                    .env("HERDR_CONTEXT_CONCURRENT_SETUP", root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let settings: Value =
+            serde_json::from_slice(&fs::read(main.join(".codex/hooks.json")).unwrap()).unwrap();
+        for event in ["UserPromptSubmit", "Stop"] {
+            assert_eq!(settings["hooks"][event].as_array().unwrap().len(), 1);
+        }
+        assert!(!main.join(".agents-go/project.json").exists());
+        for root in [&first, &second] {
+            assert!(root.join(".agents-go/project.json").is_file());
+            assert!(!root.join(".codex/hooks.json").exists());
+            assert!(install(root).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn concurrent_setup_probe() {
+        let Some(root) = std::env::var_os("HERDR_CONTEXT_CONCURRENT_SETUP") else {
+            return;
+        };
+        install(Path::new(&root)).unwrap();
+    }
+
+    #[test]
+    fn concurrent_processes_install_one_copy_without_losing_existing_hooks() {
+        let root = project();
+        fs::create_dir(root.join(".codex")).unwrap();
+        fs::write(
+            root.join(".codex/hooks.json"),
+            br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}}"#,
+        )
+        .unwrap();
+        let mut children = (0..4)
+            .map(|_| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "project_context::setup::tests::concurrent_setup_probe",
+                    ])
+                    .env("HERDR_CONTEXT_CONCURRENT_SETUP", &root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for child in children.drain(..) {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let settings: Value =
+            serde_json::from_slice(&fs::read(root.join(".codex/hooks.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "echo keep"
+        );
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(install(&root).unwrap().is_empty());
     }
 
     #[test]

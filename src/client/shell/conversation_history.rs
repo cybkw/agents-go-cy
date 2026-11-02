@@ -1,4 +1,4 @@
-// Modified for Agents Go by Agents Go contributors, 2026-10-22. See NOTICE.
+// Modified for Agents Go by Agents Go contributors, 2026-10-27. See NOTICE.
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -17,6 +17,10 @@ use crate::input::TerminalKey;
 use crate::project_context::{self, journal};
 
 use super::render::put_text;
+use super::{
+    ClientShellInput, ClientShellKeybindingSource, ClientShellOverlay, ClientShellState,
+    PendingEndpointKind,
+};
 
 const PAGE_SIZE: usize = 100;
 const WIDE_WIDTH: u16 = 84;
@@ -24,6 +28,10 @@ const WIDE_WIDTH: u16 = 84;
 #[derive(Debug)]
 struct DisplayRecord {
     seq: u64,
+    agent: String,
+    session_id: String,
+    cwd: String,
+    transcript_path: Option<String>,
     heading: String,
     time: String,
     metadata: String,
@@ -52,6 +60,10 @@ impl From<journal::Record> for DisplayRecord {
         let time = format!("{} UTC", timestamp(record.timestamp_ms));
         Self {
             seq: record.seq,
+            agent: record.agent,
+            session_id: record.session_id,
+            cwd: record.cwd,
+            transcript_path: record.transcript_path,
             metadata: format!("{heading} · {time}"),
             heading,
             time,
@@ -79,15 +91,38 @@ struct PendingRead {
     receiver: Receiver<Result<Page, String>>,
 }
 
+#[derive(Debug)]
+struct HistoryContinuation {
+    boot_id: String,
+    method: crate::api::schema::Method,
+    agent: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug)]
+struct PendingImport {
+    continuation: HistoryContinuation,
+    receiver: Receiver<Result<(), String>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Focus {
     List,
     Body,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum RecordingSetup {
+    Installing,
+    Ready,
+    Failed(String),
+}
+
 #[derive(Debug)]
 pub(super) struct ConversationHistoryOverlay {
     cwd: String,
+    workspace_id: Option<String>,
+    continue_requested: bool,
     records: Vec<DisplayRecord>,
     selected: usize,
     list_offset: usize,
@@ -96,6 +131,10 @@ pub(super) struct ConversationHistoryOverlay {
     has_more: bool,
     error: Option<String>,
     pending: Option<PendingRead>,
+    pending_import: Option<Box<PendingImport>>,
+    recording_setup: Option<RecordingSetup>,
+    refresh_after_setup: bool,
+    retry_recording_setup: bool,
     body_layout_seq: Option<u64>,
     body_layout_width: u16,
     body_lines: Vec<String>,
@@ -105,6 +144,8 @@ impl ConversationHistoryOverlay {
     pub(super) fn new(cwd: String) -> Self {
         let mut overlay = Self {
             cwd,
+            workspace_id: None,
+            continue_requested: false,
             records: Vec::new(),
             selected: 0,
             list_offset: 0,
@@ -113,12 +154,62 @@ impl ConversationHistoryOverlay {
             has_more: false,
             error: None,
             pending: None,
+            pending_import: None,
+            recording_setup: None,
+            refresh_after_setup: false,
+            retry_recording_setup: false,
             body_layout_seq: None,
             body_layout_width: 0,
             body_lines: Vec::new(),
         };
         overlay.request(Request::Refresh);
         overlay
+    }
+
+    pub(super) fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    pub(super) fn set_workspace(&mut self, workspace_id: Option<String>) {
+        self.workspace_id = workspace_id;
+    }
+
+    pub(super) fn take_continue_request(&mut self) -> bool {
+        std::mem::take(&mut self.continue_requested)
+    }
+
+    fn request_continue(&mut self) {
+        if !self.records.is_empty() && self.pending_import.is_none() {
+            self.continue_requested = true;
+        }
+    }
+
+    pub(super) fn take_recording_setup_retry(&mut self) -> bool {
+        std::mem::take(&mut self.retry_recording_setup)
+    }
+
+    /// Configuration readiness is separate from evidence of captured messages:
+    /// the Agent still owns loading and trusting its project hooks.
+    pub(super) fn set_recording_setup(&mut self, status: Option<Result<(), String>>) -> bool {
+        let next = match status {
+            None => RecordingSetup::Installing,
+            Some(Ok(())) => RecordingSetup::Ready,
+            Some(Err(error)) => RecordingSetup::Failed(visible_text(&error).replace('\n', "␊")),
+        };
+        if self.recording_setup.as_ref() == Some(&next) {
+            return false;
+        }
+        if next == RecordingSetup::Ready {
+            // The initial read may have observed the project before installation.
+            // Wait for it to finish instead of losing the required fresh read.
+            if self.pending.is_some() {
+                self.refresh_after_setup = true;
+            } else {
+                self.request(Request::Refresh);
+            }
+        }
+        self.recording_setup = Some(next);
+        true
     }
 
     /// Layout may update presentation caches; drawing only reads them. Rewrap
@@ -173,6 +264,12 @@ impl ConversationHistoryOverlay {
         }
     }
 
+    fn refresh(&mut self) {
+        self.retry_recording_setup =
+            matches!(self.recording_setup, Some(RecordingSetup::Failed(_)));
+        self.request(Request::Refresh);
+    }
+
     pub(super) fn poll(&mut self) -> bool {
         let Some(pending) = self.pending.as_ref() else {
             return false;
@@ -189,6 +286,9 @@ impl ConversationHistoryOverlay {
         match result {
             Ok(page) => self.apply_page(request, page),
             Err(error) => self.error = Some(visible_text(&error).replace('\n', "␊")),
+        }
+        if std::mem::take(&mut self.refresh_after_setup) {
+            self.request(Request::Refresh);
         }
         true
     }
@@ -274,8 +374,9 @@ impl ConversationHistoryOverlay {
         match key.code {
             KeyCode::Esc if hits.narrow && self.focus == Focus::Body => self.focus = Focus::List,
             KeyCode::Esc => return true,
-            KeyCode::Char('r' | 'R') => self.request(Request::Refresh),
+            KeyCode::Char('r' | 'R') => self.refresh(),
             KeyCode::Char('n' | 'N') => self.older(),
+            KeyCode::Char('c' | 'C') if key.kind == KeyEventKind::Press => self.request_continue(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.focus == Focus::List {
                     Focus::Body
@@ -337,8 +438,10 @@ impl ConversationHistoryOverlay {
                     }
                     return true;
                 }
-                if hits.refresh.contains(point) {
-                    self.request(Request::Refresh);
+                if hits.continue_session.contains(point) {
+                    self.request_continue();
+                } else if hits.refresh.contains(point) {
+                    self.refresh();
                 } else if hits.older.contains(point) {
                     self.older();
                 } else if let Some((_, index)) =
@@ -374,6 +477,256 @@ impl ConversationHistoryOverlay {
             _ => {}
         }
         false
+    }
+}
+
+impl ClientShellState {
+    pub(super) fn continue_conversation_history(&mut self, outcome: &mut ClientShellInput) {
+        use crate::api::schema::{
+            AgentStartParams, Method, TabCreateParams, WorkspaceCreateParams,
+        };
+
+        if !self.active_endpoint_id.is_local()
+            || self.config.keybinding_source != ClientShellKeybindingSource::Local
+        {
+            return;
+        }
+        let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() else {
+            return;
+        };
+        if history.pending_import.is_some() {
+            return;
+        }
+        let Some(record) = history.records.get(history.selected) else {
+            return;
+        };
+        // These are IDs, never flags, shell commands, paths, or message text.
+        if !matches!(record.agent.as_str(), "codex" | "claude")
+            || record.session_id.is_empty()
+            || record.session_id.len() > 512
+            || !record.session_id.as_bytes()[0].is_ascii_alphanumeric()
+            || !record
+                .session_id
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_'))
+        {
+            history.error = Some("无法继续：记录中的 Agent 或会话 ID 无效。".into());
+            return;
+        }
+        if !Path::new(&record.cwd).is_absolute() || record.cwd.chars().any(char::is_control) {
+            history.error = Some("无法继续：记录中的项目目录无效。".into());
+            return;
+        }
+        let session = crate::agent_resume::AgentSessionRef::id(record.session_id.clone())
+            .expect("validated session ID");
+        let plan =
+            crate::agent_resume::plan(&format!("herdr:{}", record.agent), &record.agent, &session)
+                .expect("supported journal agent");
+        let agent = record.agent.clone();
+        let args = plan.argv.into_iter().skip(1).collect::<Vec<_>>();
+        let cwd = record.cwd.clone();
+        let session_id = record.session_id.clone();
+        let transcript_path = record.transcript_path.clone();
+        let workspace_id = history.workspace_id.clone();
+        let start = Method::AgentStart(AgentStartParams {
+            name: "history".into(),
+            kind: agent.clone(),
+            pane_id: String::new(),
+            args: args.clone(),
+            timeout_ms: None,
+        });
+        // Check both capabilities before creating anything on an older server.
+        if !self.supports_endpoint_method(&start) {
+            if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
+                history.error = Some("当前后台不支持继续会话，请更新后台后重试。".into());
+            }
+            return;
+        }
+        let mut method = if let Some(workspace_id) = workspace_id {
+            if self.snapshot.as_deref().is_none_or(|snapshot| {
+                !snapshot
+                    .workspaces
+                    .iter()
+                    .any(|ws| ws.workspace_id == workspace_id)
+            }) {
+                if let Some(ClientShellOverlay::ConversationHistory(history)) =
+                    self.overlay.as_mut()
+                {
+                    history.error = Some("项目已关闭，请重新打开对话记录后重试。".into());
+                }
+                return;
+            }
+            Method::TabCreate(TabCreateParams {
+                workspace_id: Some(workspace_id),
+                cwd: Some(cwd),
+                focus: true,
+                label: Some(format!("{agent} · 继续对话")),
+                env: Default::default(),
+            })
+        } else {
+            Method::WorkspaceCreate(WorkspaceCreateParams {
+                source_workspace_id: None,
+                cwd: Some(cwd),
+                focus: true,
+                label: None,
+                env: Default::default(),
+            })
+        };
+        if !self.supports_endpoint_method(&method) {
+            if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
+                history.error = Some("当前后台不支持创建恢复终端，请更新后台后重试。".into());
+            }
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let boot_id = snapshot.boot_id.clone();
+        // Native hook IDs are UUIDs. Named sessions keep the existing CLI path.
+        if agent == "codex" && project_context::native_import::is_native_session_id(&session_id) {
+            let locations = match self.config.codex_import_locations.clone() {
+                Ok(locations) => locations,
+                Err(error) => {
+                    if let Some(ClientShellOverlay::ConversationHistory(history)) =
+                        self.overlay.as_mut()
+                    {
+                        history.error =
+                            Some(format!("无法准备 Codex 会话：{}", visible_text(&error)));
+                    }
+                    return;
+                }
+            };
+            let Some(target_home) = locations.target_home.to_str() else {
+                if let Some(ClientShellOverlay::ConversationHistory(history)) =
+                    self.overlay.as_mut()
+                {
+                    history.error = Some("当前 Codex 配置目录不是有效的文本路径。".into());
+                }
+                return;
+            };
+            // Pin the current account's home, never the source account's home.
+            match &mut method {
+                Method::TabCreate(params) => {
+                    params.env.insert("CODEX_HOME".into(), target_home.into());
+                }
+                Method::WorkspaceCreate(params) => {
+                    params.env.insert("CODEX_HOME".into(), target_home.into());
+                }
+                _ => unreachable!("history creates only a tab or workspace"),
+            }
+            let cwd = match &method {
+                Method::TabCreate(params) => params.cwd.clone().expect("history cwd"),
+                Method::WorkspaceCreate(params) => params.cwd.clone().expect("history cwd"),
+                _ => unreachable!("history creates only a tab or workspace"),
+            };
+            let (sender, receiver) = mpsc::channel();
+            let continuation = HistoryContinuation {
+                boot_id,
+                method,
+                agent,
+                args,
+            };
+            let task = std::thread::Builder::new()
+                .name("conversation-import".into())
+                .spawn(move || {
+                    let result = locations.prepare(
+                        &session_id,
+                        Path::new(&cwd),
+                        transcript_path.as_deref().map(Path::new),
+                    );
+                    let _ = sender.send(result);
+                });
+            if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
+                match task {
+                    Ok(_) => {
+                        history.error = None;
+                        history.pending_import = Some(Box::new(PendingImport {
+                            continuation,
+                            receiver,
+                        }));
+                    }
+                    Err(error) => history.error = Some(format!("无法启动会话准备任务：{error}")),
+                }
+            }
+            return;
+        }
+        self.start_history_continuation(
+            HistoryContinuation {
+                boot_id,
+                method,
+                agent,
+                args,
+            },
+            outcome,
+        );
+    }
+
+    pub(crate) fn poll_conversation_history_continue(&mut self, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() else {
+            return;
+        };
+        let Some(pending) = history.pending_import.as_ref() else {
+            return;
+        };
+        let result = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("会话准备任务意外结束，请重试。".into()),
+        };
+        let pending = history.pending_import.take().expect("pending import");
+        outcome.repaint = true;
+        match result {
+            Ok(()) => self.start_history_continuation(pending.continuation, outcome),
+            Err(error) => history.error = Some(format!("无法继续：{}", visible_text(&error))),
+        }
+    }
+
+    fn start_history_continuation(
+        &mut self,
+        continuation: HistoryContinuation,
+        outcome: &mut ClientShellInput,
+    ) {
+        let HistoryContinuation {
+            boot_id,
+            method,
+            agent,
+            args,
+        } = continuation;
+        if !self.active_endpoint_id.is_local()
+            || self.config.keybinding_source != ClientShellKeybindingSource::Local
+            || self
+                .snapshot
+                .as_deref()
+                .is_none_or(|snapshot| snapshot.boot_id != boot_id)
+        {
+            if let Some(ClientShellOverlay::ConversationHistory(history)) = self.overlay.as_mut() {
+                history.error = Some("后台已切换或重启，请重新打开对话记录后重试。".into());
+            }
+            return;
+        }
+        if let crate::api::schema::Method::TabCreate(params) = &method {
+            let workspace_exists = self.snapshot.as_deref().is_some_and(|snapshot| {
+                snapshot
+                    .workspaces
+                    .iter()
+                    .any(|workspace| Some(&workspace.workspace_id) == params.workspace_id.as_ref())
+            });
+            if !workspace_exists {
+                if let Some(ClientShellOverlay::ConversationHistory(history)) =
+                    self.overlay.as_mut()
+                {
+                    history.error = Some("项目已关闭，请重新打开对话记录后重试。".into());
+                }
+                return;
+            }
+        }
+        if self.push_endpoint_method_with_kind(
+            method,
+            PendingEndpointKind::ContinueConversation { agent, args },
+            outcome,
+        ) {
+            self.overlay = None;
+        }
     }
 }
 
@@ -439,6 +792,7 @@ pub(super) struct ConversationHistoryHits {
     refresh: Rect,
     older: Rect,
     close: Rect,
+    pub(super) continue_session: Rect,
     rows: Vec<(Rect, usize)>,
     visible_rows: usize,
     list_offset: usize,
@@ -510,7 +864,15 @@ pub(super) fn render(
         inner.x,
         inner.y,
         inner.width.saturating_sub(hits.close.width),
-        "对话记录",
+        match &overlay.recording_setup {
+            Some(RecordingSetup::Installing) => "对话记录 · 自动接入中",
+            Some(RecordingSetup::Ready) if overlay.records.is_empty() => {
+                "对话记录 · 等待加载／信任"
+            }
+            Some(RecordingSetup::Ready) => "对话记录 · 已有采集记录",
+            Some(RecordingSetup::Failed(_)) => "对话记录 · 采集配置异常",
+            None => "对话记录",
+        },
         accent.add_modifier(Modifier::BOLD),
     );
     put_text(
@@ -548,10 +910,18 @@ pub(super) fn render(
         );
     }
     if header_rows >= 2 {
-        let status = if overlay.pending.is_some() {
+        let status = if let Some(RecordingSetup::Failed(error)) = &overlay.recording_setup {
+            format!("采集配置异常：{error}")
+        } else if overlay.recording_setup == Some(RecordingSetup::Installing) {
+            "正在自动接入对话采集…".into()
+        } else if overlay.pending.is_some() {
             "正在读取…".to_owned()
         } else if let Some(error) = &overlay.error {
             error.clone()
+        } else if overlay.records.is_empty()
+            && overlay.recording_setup == Some(RecordingSetup::Ready)
+        {
+            "配置就绪，等待 Agent 加载／信任；重开会话确认 Hook。".into()
         } else if overlay.records.is_empty() {
             "暂无对话记录，已采集的用户发言和最终回复将在这里显示。".into()
         } else {
@@ -571,7 +941,9 @@ pub(super) fn render(
             inner.y + header_rows - 1,
             inner.width,
             &status,
-            if overlay.error.is_some() {
+            if overlay.error.is_some()
+                || matches!(overlay.recording_setup, Some(RecordingSetup::Failed(_)))
+            {
                 base.fg(palette.red)
             } else {
                 muted
@@ -609,11 +981,29 @@ pub(super) fn render(
     }
     if footer_rows > 0 {
         let y = inner.bottom() - footer_rows;
-        let refresh_width = inner.width.min(14);
-        hits.refresh = Rect::new(inner.x, y, refresh_width, 1);
-        let older_width = inner.width.saturating_sub(refresh_width + 1).min(18);
+        let continue_width = if overlay.records.is_empty() {
+            0
+        } else {
+            inner.width.min(14)
+        };
+        if continue_width > 0 {
+            hits.continue_session = Rect::new(inner.x, y, continue_width, 1);
+            let label = if overlay.pending_import.is_some() {
+                "[准备会话…]"
+            } else {
+                "[C 继续对话]"
+            };
+            put_text(buffer, inner.x, y, continue_width, label, accent);
+        }
+        let refresh_x = inner.x + continue_width;
+        let refresh_width = inner.width.saturating_sub(continue_width).min(14);
+        hits.refresh = Rect::new(refresh_x, y, refresh_width, 1);
+        let older_width = inner
+            .width
+            .saturating_sub(continue_width + refresh_width + 1)
+            .min(18);
         if overlay.has_more && older_width > 0 {
-            hits.older = Rect::new(inner.x + refresh_width + 1, y, older_width, 1);
+            hits.older = Rect::new(refresh_x + refresh_width + 1, y, older_width, 1);
         }
         put_text(
             buffer,
@@ -929,6 +1319,8 @@ mod tests {
     fn empty() -> ConversationHistoryOverlay {
         ConversationHistoryOverlay {
             cwd: "test-project".into(),
+            workspace_id: None,
+            continue_requested: false,
             records: Vec::new(),
             selected: 0,
             list_offset: 0,
@@ -937,6 +1329,10 @@ mod tests {
             has_more: false,
             error: None,
             pending: None,
+            pending_import: None,
+            recording_setup: None,
+            refresh_after_setup: false,
+            retry_recording_setup: false,
             body_layout_seq: None,
             body_layout_width: 0,
             body_lines: Vec::new(),
@@ -1026,6 +1422,97 @@ mod tests {
         wait_for_result(&mut overlay);
         assert!(overlay.error.as_ref().unwrap().contains("尚未启用"));
         assert!(!disabled.0.join(".agents-go").exists());
+    }
+
+    #[test]
+    fn recording_setup_refreshes_a_previously_disabled_project_and_waits_for_agent_trust() {
+        let project = Project::new(false);
+        let mut overlay = ConversationHistoryOverlay::new(project.cwd());
+        wait_for_result(&mut overlay);
+        assert!(overlay.error.as_ref().unwrap().contains("尚未启用"));
+        assert_eq!(overlay.cwd(), project.cwd());
+        assert!(overlay.set_recording_setup(None));
+        assert!(buffer_text(&draw(&mut overlay, 100, 25).0).contains("自动接入中"));
+
+        std::fs::create_dir_all(project.0.join(".agents-go")).unwrap();
+        std::fs::write(
+            project.0.join(".agents-go/project.json"),
+            b"{\"version\":1}",
+        )
+        .unwrap();
+        assert!(overlay.set_recording_setup(Some(Ok(()))));
+        wait_for_result(&mut overlay);
+        assert!(overlay.error.is_none());
+        let text = buffer_text(&draw(&mut overlay, 140, 25).0);
+        assert!(text.contains("等待加载／信任"));
+        assert!(text.contains("重开会话确认 Hook"));
+        assert!(!text.contains("采集中"));
+        assert!(!overlay.set_recording_setup(Some(Ok(()))));
+        assert!(overlay.pending.is_none());
+    }
+
+    #[test]
+    fn recording_setup_success_defers_refresh_until_the_previous_read_finishes() {
+        let project = Project::new(true);
+        project.write_records(1);
+        let mut overlay = empty();
+        overlay.cwd = project.cwd();
+        let (sender, receiver) = mpsc::channel();
+        overlay.pending = Some(PendingRead {
+            request: Request::Refresh,
+            receiver,
+        });
+        assert!(overlay.set_recording_setup(None));
+        assert!(overlay.set_recording_setup(Some(Ok(()))));
+        assert!(overlay.refresh_after_setup);
+        sender
+            .send(Err("stale disabled-project result".into()))
+            .unwrap();
+        assert!(overlay.poll());
+        assert!(!overlay.refresh_after_setup);
+        assert!(overlay.pending.is_some());
+        wait_for_result(&mut overlay);
+        assert!(overlay.error.is_none());
+        assert_eq!(overlay.records.len(), 1);
+    }
+
+    #[test]
+    fn recording_setup_failure_keeps_history_readable_and_sanitizes_the_error() {
+        let project = Project::new(true);
+        project.write_records(1);
+        let original = std::fs::read(project.history()).unwrap();
+        let mut overlay = ConversationHistoryOverlay::new(project.cwd());
+        wait_for_result(&mut overlay);
+        assert!(overlay.set_recording_setup(Some(Err("permission denied\n\x1b[31m".into()))));
+        let text = buffer_text(&draw(&mut overlay, 140, 25).0);
+        assert!(text.contains("采集配置异常"));
+        assert!(text.contains("permission denied"));
+        assert!(!text.contains('\x1b'));
+        assert!(text.contains("原文 1"));
+        assert_eq!(overlay.records.len(), 1);
+        assert!(overlay.error.is_none());
+        assert!(buffer_text(&draw(&mut overlay, 55, 15).0).contains("采集配置异常"));
+        assert_eq!(std::fs::read(project.history()).unwrap(), original);
+    }
+
+    #[test]
+    fn recording_setup_mouse_refresh_requests_one_retry_and_none_while_installing() {
+        let project = Project::new(true);
+        let mut overlay = ConversationHistoryOverlay::new(project.cwd());
+        overlay.set_recording_setup(Some(Err("permission denied".into())));
+        let (_, hits) = draw(&mut overlay, 140, 25);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hits.refresh.x,
+            row: hits.refresh.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        overlay.handle_mouse(mouse, &hits);
+        assert!(overlay.take_recording_setup_retry());
+        assert!(!overlay.take_recording_setup_retry());
+        overlay.set_recording_setup(None);
+        overlay.handle_mouse(mouse, &hits);
+        assert!(!overlay.take_recording_setup_retry());
     }
 
     #[test]
@@ -1283,6 +1770,41 @@ mod tests {
         let (buffer, hits) = draw(&mut overlay, 45, 20);
         assert!(buffer_text(&buffer).contains("[关闭]"));
         assert!(overlay.handle_mouse(click(hits.close), &hits));
+    }
+
+    #[test]
+    fn continue_button_and_shortcut_require_records_and_ignore_repeats() {
+        let mut overlay = empty();
+        let (_, hits) = draw(&mut overlay, 120, 25);
+        assert!(hits.continue_session.is_empty());
+        overlay.handle_key(&key(KeyCode::Char('c')), &hits);
+        assert!(!overlay.take_continue_request());
+
+        overlay.apply_page(Request::Refresh, page(&[2, 1], false));
+        let (buffer, hits) = draw(&mut overlay, 45, 20);
+        assert!(buffer_text(&buffer).contains("[C 继续对话]"));
+        assert!(!hits.continue_session.is_empty());
+        overlay.handle_key(
+            &key(KeyCode::Char('c')).with_kind(KeyEventKind::Repeat),
+            &hits,
+        );
+        assert!(!overlay.take_continue_request());
+        // Reading a row continues to open its body without launching anything.
+        overlay.handle_key(&key(KeyCode::Enter), &hits);
+        assert!(!overlay.take_continue_request());
+        overlay.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hits.continue_session.x,
+                row: hits.continue_session.y,
+                modifiers: KeyModifiers::empty(),
+            },
+            &hits,
+        );
+        assert!(overlay.take_continue_request());
+        assert!(!overlay.take_continue_request());
+        overlay.handle_key(&key(KeyCode::Char('c')), &hits);
+        assert!(overlay.take_continue_request());
     }
 
     #[test]

@@ -1,14 +1,29 @@
 //! Project-owned conversation history, independent of terminal/session snapshots.
 use std::path::{Path, PathBuf};
 
+mod automatic;
 pub(crate) mod journal;
+pub(crate) mod native_import;
 mod setup;
 
+pub(crate) use automatic::auto_enable;
 pub(crate) use setup::enable;
 
 /// An explicitly enabled directory owns its descendants, up to a nested project.
 /// In particular, a nested Git worktree must opt in rather than inherit a parent log.
 pub(crate) fn project_root(cwd: &Path) -> Result<PathBuf, String> {
+    resolve_root(cwd, false)
+}
+
+fn resolve_root(cwd: &Path, automatic: bool) -> Result<PathBuf, String> {
+    find_root(cwd, automatic)?.ok_or_else(not_enabled)
+}
+
+fn not_enabled() -> String {
+    "project context is not enabled here; run herdr context enable --project <PATH>".into()
+}
+
+fn find_root(cwd: &Path, automatic: bool) -> Result<Option<PathBuf>, String> {
     let cwd = cwd
         .canonicalize()
         .map_err(|err| format!("cannot resolve project directory: {err}"))?;
@@ -24,16 +39,22 @@ pub(crate) fn project_root(cwd: &Path) -> Result<PathBuf, String> {
                 if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
                     return Err("unsupported project context version".into());
                 }
-                return Ok(directory.to_path_buf());
+                return Ok(Some(directory.to_path_buf()));
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(format!("cannot read project context marker: {err}")),
         }
         if directory.join(".git").exists() {
+            if automatic {
+                return Ok(Some(directory.to_path_buf()));
+            }
             break;
         }
     }
-    Err("project context is not enabled here; run herdr context enable --project <PATH>".into())
+    if automatic {
+        return Ok(Some(cwd));
+    }
+    Ok(None)
 }
 
 /// A hook installed for one project cannot write messages from a different project.
@@ -41,6 +62,23 @@ pub(crate) fn capture(
     project: Option<&Path>,
     agent: &str,
     payload: &serde_json::Value,
+) -> Result<Option<journal::Record>, String> {
+    capture_inner(project, agent, payload, false)
+}
+
+/// 共享 Hook 只记录已启用的实际目录，不替未接入的工作树创建账本。
+pub(crate) fn capture_if_enabled(
+    agent: &str,
+    payload: &serde_json::Value,
+) -> Result<Option<journal::Record>, String> {
+    capture_inner(None, agent, payload, true)
+}
+
+fn capture_inner(
+    project: Option<&Path>,
+    agent: &str,
+    payload: &serde_json::Value,
+    if_enabled: bool,
 ) -> Result<Option<journal::Record>, String> {
     if payload
         .get("agent_id")
@@ -53,7 +91,11 @@ pub(crate) fn capture(
         .get("cwd")
         .and_then(serde_json::Value::as_str)
         .ok_or("hook payload is missing cwd")?;
-    let root = project_root(Path::new(cwd))?;
+    let root = match find_root(Path::new(cwd), false)? {
+        Some(root) => root,
+        None if if_enabled => return Ok(None),
+        None => return Err(not_enabled()),
+    };
     if let Some(project) = project {
         if project_root(project)? != root {
             return Err("hook cwd belongs to a different project".into());
@@ -173,6 +215,70 @@ mod tests {
         assert!(!first.join(".agents-go/history.jsonl").exists());
         std::fs::write(first.join(".agents-go/project.json"), "invalid").unwrap();
         assert!(project_root(&first).is_err());
+    }
+
+    #[test]
+    fn shared_capture_routes_each_enabled_worktree_to_its_own_ledger() {
+        let first = directory();
+        let second = directory();
+        for (root, session) in [(&first, "first"), (&second, "second")] {
+            std::fs::write(root.join(".git"), "gitdir: fixture").unwrap();
+            let cwd = root.join("src");
+            std::fs::create_dir(&cwd).unwrap();
+            let payload = serde_json::json!({
+                "cwd": cwd, "session_id": session, "turn_id": "one",
+                "hook_event_name": "UserPromptSubmit", "prompt": session,
+            });
+            let record = capture_if_enabled("codex", &payload).unwrap().unwrap();
+            assert_eq!(record.seq, 1);
+            assert_eq!(record.text, session);
+            let saved = journal::read(root, None, None, 10).unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].session_id, session);
+        }
+    }
+
+    #[test]
+    fn shared_capture_skips_unenabled_nested_git_without_inheriting_parent() {
+        let parent = directory();
+        let child = parent.join("not-enabled");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+        let payload = serde_json::json!({
+            "cwd": child, "session_id": "fixture", "hook_event_name": "UserPromptSubmit",
+            "prompt": "must not be recorded",
+        });
+        assert!(capture_if_enabled("codex", &payload).unwrap().is_none());
+        assert!(!child.join(".agents-go").exists());
+        assert!(!parent.join(".agents-go/history.jsonl").exists());
+        assert!(capture(None, "codex", &payload)
+            .unwrap_err()
+            .contains("not enabled"));
+    }
+
+    #[test]
+    fn shared_capture_does_not_hide_invalid_markers_cwd_or_corrupt_history() {
+        let root = directory();
+        let mut payload = serde_json::json!({
+            "cwd": root, "session_id": "fixture", "hook_event_name": "UserPromptSubmit",
+            "prompt": "must not be recorded",
+        });
+        std::fs::write(root.join(".agents-go/project.json"), "invalid").unwrap();
+        assert!(capture_if_enabled("codex", &payload)
+            .unwrap_err()
+            .contains("invalid"));
+        std::fs::write(root.join(".agents-go/project.json"), r#"{"version":1}"#).unwrap();
+        std::fs::write(root.join(".agents-go/history.jsonl"), "invalid\n").unwrap();
+        assert!(capture_if_enabled("codex", &payload).is_err());
+        assert_eq!(
+            std::fs::read(root.join(".agents-go/history.jsonl")).unwrap(),
+            b"invalid\n"
+        );
+        payload["cwd"] = serde_json::json!(root.join("missing"));
+        assert!(capture_if_enabled("codex", &payload).is_err());
+        payload.as_object_mut().unwrap().remove("cwd");
+        assert!(capture_if_enabled("codex", &payload)
+            .unwrap_err()
+            .contains("missing cwd"));
     }
 
     #[test]

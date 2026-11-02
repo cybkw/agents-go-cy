@@ -893,6 +893,73 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
     shutdown_test_runtimes(&mut server);
 }
 
+#[tokio::test]
+async fn client_shell_endpoint_agent_start_reaches_handler_and_reports_missing_pane() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("endpoint")];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    let client_id = 43;
+    server.handle_server_event(ServerEvent::ClientShellConnected {
+        surface_reuse: false,
+        surface_delta: false,
+        surface_scroll: false,
+        client_id,
+        surface_cols: 80,
+        surface_rows: 23,
+        cell_width_px: 0,
+        cell_height_px: 0,
+        pixel_mouse: false,
+        direct_graphics: false,
+        endpoint_keybindings: false,
+        mouse_capture: false,
+        surface_active: true,
+        writer,
+    });
+    let _initial_snapshot = client_shell_snapshot(&control_rx);
+    let boot_id = server.client_shell_boot_id.clone();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: boot_id.clone(),
+        request: Box::new(api::schema::Request {
+            id: "client-shell:resume".into(),
+            method: api::schema::Method::AgentStart(api::schema::AgentStartParams {
+                name: "history-test".into(),
+                kind: "codex".into(),
+                pane_id: "missing-pane".into(),
+                args: vec!["resume".into(), "original-session".into()],
+                timeout_ms: None,
+            }),
+        }),
+    });
+    // A missing target must reach agent.start validation, not the lane's unsupported gate.
+    assert!(server.clients[&client_id].shell_endpoint_command_in_flight);
+    let response_ready =
+        tokio::time::timeout(Duration::from_secs(5), server.server_event_rx.recv())
+            .await
+            .expect("endpoint response timeout")
+            .expect("endpoint response ready");
+    server.handle_server_event(response_ready);
+    assert!(!server.clients[&client_id].shell_endpoint_command_in_flight);
+    let ServerMessage::ClientShellEndpointResponseChunk {
+        boot_id: response_boot_id,
+        request_id,
+        final_chunk,
+        data,
+    } = read_server_message(control_rx.recv().expect("agent start response"))
+    else {
+        panic!("expected endpoint response");
+    };
+    assert_eq!(response_boot_id, boot_id);
+    assert_eq!(request_id, "client-shell:resume");
+    assert!(final_chunk);
+    let response: api::schema::ErrorResponse = serde_json::from_slice(&data).unwrap();
+    assert_eq!(response.id, "client-shell:resume");
+    assert_eq!(response.error.code, "agent_pane_not_found");
+    shutdown_test_runtimes(&mut server);
+}
+
 #[test]
 fn terminal_client_endpoint_request_error_removes_client() {
     let mut server = test_headless_server();

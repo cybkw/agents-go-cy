@@ -181,6 +181,54 @@ fn project_context_cli_serializes_separate_processes_and_isolates_projects() {
     assert_eq!(records(&root), saved);
 }
 
+#[test]
+fn project_context_shared_capture_routes_by_cwd_and_skips_unenabled_projects() {
+    let first = project();
+    let second = project();
+    let unenabled = project();
+    std::fs::create_dir(unenabled.join(".git")).unwrap();
+    for root in [&first, &second] {
+        std::fs::create_dir(root.join(".agents-go")).unwrap();
+        std::fs::write(root.join(".agents-go/project.json"), r#"{"version":1}"#).unwrap();
+    }
+    for (root, session) in [(&first, "first"), (&second, "second"), (&unenabled, "skip")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+        command.args(["context", "capture", "--agent", "codex", "--if-enabled"]);
+        let output = hook(command, &prompt(root, session, 1, session))
+            .wait_with_output()
+            .unwrap();
+        success(&output);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+    assert!(!unenabled.join(".agents-go").exists());
+    let first_records = records(&first);
+    let second_records = records(&second);
+    assert_eq!(first_records.len(), 1);
+    assert_eq!(second_records.len(), 1);
+    assert_eq!(first_records[0]["seq"], 1);
+    assert_eq!(second_records[0]["seq"], 1);
+    assert_eq!(first_records[0]["text"], "first");
+    assert_eq!(second_records[0]["text"], "second");
+}
+
+#[test]
+fn project_context_shared_capture_reports_broken_configuration_and_rejects_project_constraint() {
+    let root = project();
+    std::fs::create_dir(root.join(".agents-go")).unwrap();
+    std::fs::write(root.join(".agents-go/project.json"), "broken").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command.args(["context", "capture", "--agent", "codex", "--if-enabled"]);
+    let output = hook(command, &prompt(&root, "broken", 1, "不得泄漏的原文"))
+        .wait_with_output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("不得泄漏的原文"));
+    assert!(!root.join(".agents-go/history.jsonl").exists());
+    let output = cli(&root, &["capture", "--agent", "codex", "--if-enabled"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
 #[cfg(windows)]
 #[test]
 fn project_context_installed_windows_hooks_deliver_original_json_to_the_real_cli() {
@@ -230,4 +278,85 @@ fn project_context_installed_windows_hooks_deliver_original_json_to_the_real_cli
     assert_eq!(saved.len(), 2);
     assert_eq!(saved[0]["text"], original);
     assert_eq!(saved[1]["text"], "接续上下文\n完整回复");
+}
+
+#[cfg(windows)]
+#[test]
+fn project_context_shared_windows_hook_routes_real_git_worktrees_and_skips_unenabled() {
+    let main = project();
+    let linked = project();
+    let skipped = project();
+    let git = |args: &[&std::ffi::OsStr]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(args)
+            .output()
+            .unwrap();
+        success(&output);
+    };
+    git(&["init".as_ref()]);
+    git(&[
+        "-c".as_ref(),
+        "user.name=Fixture".as_ref(),
+        "-c".as_ref(),
+        "user.email=fixture@example.invalid".as_ref(),
+        "-c".as_ref(),
+        "commit.gpgsign=false".as_ref(),
+        "commit".as_ref(),
+        "--allow-empty".as_ref(),
+        "-m".as_ref(),
+        "fixture".as_ref(),
+    ]);
+    for directory in [&linked, &skipped] {
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "--detach".as_ref(),
+            directory.as_os_str(),
+        ]);
+    }
+    success(&cli(&linked, &["enable", "--agent", "codex"]));
+    assert!(!main.join(".agents-go/project.json").exists());
+    success(&cli(&main, &["enable", "--agent", "codex"]));
+    let settings: Value =
+        serde_json::from_slice(&std::fs::read(main.join(".codex/hooks.json")).unwrap()).unwrap();
+    for (root, session) in [(&main, "main"), (&linked, "linked"), (&skipped, "skipped")] {
+        let cwd = root.join("src");
+        std::fs::create_dir(&cwd).unwrap();
+        for (event, text_key, text) in [
+            ("UserPromptSubmit", "prompt", "中文原文\n` $() ' \""),
+            ("Stop", "last_assistant_message", "完整回复"),
+        ] {
+            let encoded = settings["hooks"][event][0]["hooks"][0]["commandWindows"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .last()
+                .unwrap();
+            let mut command = Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]);
+            let mut payload = prompt(&cwd, session, 1, "");
+            payload["hook_event_name"] = json!(event);
+            payload[text_key] = json!(text);
+            let output = hook(command, &payload).wait_with_output().unwrap();
+            success(&output);
+            assert!(output.stdout.is_empty());
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    assert!(!skipped.join(".agents-go").exists());
+    for (root, session) in [(&main, "main"), (&linked, "linked")] {
+        let saved = records(root);
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0]["seq"], 1);
+        assert_eq!(saved[0]["text"], "中文原文\n` $() ' \"");
+        assert_eq!(saved[1]["seq"], 2);
+        assert_eq!(saved[1]["reply_to"], 1);
+        assert!(saved.iter().all(|record| record["session_id"] == session));
+    }
 }

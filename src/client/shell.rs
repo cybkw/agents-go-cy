@@ -32,6 +32,7 @@ mod notifications;
 mod overlay_input;
 mod preferences;
 mod project_history;
+mod project_recording;
 mod render;
 mod scroll;
 mod settings;
